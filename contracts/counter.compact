@@ -1,16 +1,68 @@
+/**
+ * counter.compact — Privacy-aware counter on Midnight
+ *
+ * =============================================================================
+ * PUBLIC vs PRIVATE
+ * =============================================================================
+ *
+ * PUBLIC (on-chain ledger — visible to everyone who reads the contract state):
+ *   - `round`  : Counter of successful increments (fully public).
+ *   - `owner`  : 32-byte commitment to the owner. This is a hash of the caller's
+ *                secret key; observers see the commitment, not the secret.
+ *
+ * PRIVATE (local / off-chain — never placed on the ledger unless disclose()'d):
+ *   - `secretKey()` witness: a 32-byte secret held only in the caller's local
+ *     private state (TypeScript). It is a circuit input via the witness channel
+ *     and is used inside the zero-knowledge proof. The raw secret is never
+ *     written to public ledger fields.
+ *
+ * DISCLOSE (deliberate revelation):
+ *   - `claim()` calls `disclose(ownerPublicKey(secretKey()))` so that only the
+ *     derived public commitment is published to `owner`. The secret key itself
+ *     is intentionally NOT disclosed — proving ownership later compares hashes
+ *     inside the circuit without revealing the preimage.
+ * =============================================================================
+ */
+
 pragma language_version >= 0.23;
 
 import CompactStandardLibrary;
 
-// Public ledger state — counter visible on chain
+// ─── Public ledger state ─────────────────────────────────────────────────────
 export ledger round: Counter;
+export ledger owner: Bytes<32>;
 
-// Increment the on-chain counter by 1
+// ─── Private witness (implemented in TypeScript; secret never leaves the device) ─
+witness secretKey(): Bytes<32>;
+
+// Pure helper: derive a public commitment from a private secret key.
+circuit ownerPublicKey(sk: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "counter:owner:"),
+    sk
+  ]);
+}
+
+// Register as owner by deliberately disclosing the public commitment only.
+export circuit claim(): [] {
+  owner = disclose(ownerPublicKey(secretKey()));
+}
+
+// Increment the public counter; requires proving knowledge of the owner secret.
 export circuit increment(): [] {
+  assert(
+    owner == ownerPublicKey(secretKey()),
+    "Only the owner can increment"
+  );
   round.increment(1);
 }
 
-// Reset the counter to zero
-export circuit reset(): [] {
-  round.decrement(round);
+// Decrement the public counter by one; same ownership proof as increment.
+// (Counter.decrement takes Uint<16>, so full zeroing is done via repeated calls.)
+export circuit decrement(): [] {
+  assert(
+    owner == ownerPublicKey(secretKey()),
+    "Only the owner can decrement"
+  );
+  round.decrement(1);
 }

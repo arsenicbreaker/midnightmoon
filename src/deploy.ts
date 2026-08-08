@@ -1,16 +1,18 @@
 /**
- * Deploy hello-world contract to a Midnight network (undeployed by default; use --network preview|preprod for public networks).
+ * Deploy the counter contract to a Midnight network
+ * (default: undeployed; use --network preview|preprod for public networks).
  *
- * Non-interactive: scaffold → npm run setup runs straight through.
- * No readline prompts, no .midnight-seed file.
+ * Non-interactive: npm run deploy -- --network preview
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, recordDeployment } from './network';
 import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
+import { createCounterPrivateState, witnesses } from './witnesses';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
+import { randomBytes } from 'node:crypto';
 
 // Midnight SDK imports
 import { deployContract } from '@midnight-ntwrk/midnight-js-contracts';
@@ -23,9 +25,8 @@ import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-j
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
 
-// Identifier under which this contract's private state is stored. The
-// hello-world contract has no witnesses, so its private state is empty ({}).
-const PRIVATE_STATE_ID = 'helloWorldPrivateState';
+// Identifier under which this contract's private state is stored.
+const PRIVATE_STATE_ID = 'counterPrivateState';
 
 // ─── Network configuration ─────────────────────────────────────────────────────
 //
@@ -71,7 +72,8 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
 // ─── Compiled contract loading ─────────────────────────────────────────────────
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
+// Counter compile output lives at managed/counter (project root), not contracts/managed.
+const zkConfigPath = path.resolve(__dirname, '..', 'managed', 'counter');
 const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
 
 if (!fs.existsSync(contractPath)) {
@@ -79,10 +81,10 @@ if (!fs.existsSync(contractPath)) {
   process.exit(1);
 }
 
-const HelloWorld = await import(pathToFileURL(contractPath).href);
+const CounterModule = await import(pathToFileURL(contractPath).href);
 
-const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-  CompiledContract.withVacantWitnesses,
+const compiledContract = CompiledContract.make('counter', CounterModule.Contract).pipe(
+  CompiledContract.withWitnesses(witnesses as any),
   CompiledContract.withCompiledFileAssets(zkConfigPath),
 );
 
@@ -117,7 +119,7 @@ async function createProviders(walletCtx: WalletContext) {
 
   return {
     privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
+      privateStateStoreName: 'counter-state',
       accountId,
       privateStoragePasswordProvider: () => privateStatePassword,
     }),
@@ -133,7 +135,7 @@ async function createProviders(walletCtx: WalletContext) {
 
 async function main() {
   console.log('\n╔══════════════════════════════════════════════════════════════╗');
-  console.log(`║  Deploy hello-world to ${network}`);
+  console.log(`║  Deploy counter to ${network}`);
   console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
   const seed = SEED;
@@ -286,19 +288,19 @@ async function main() {
   const RETRY_DELAY_MS = 5000;
   let deployed: Awaited<ReturnType<typeof deployContract>> | undefined;
 
+  // Owner secret for the counter witness — generated once, reused across retries.
+  const initialPrivateState = createCounterPrivateState(randomBytes(32));
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       // Midnight.js 4.1.x supplies private state via privateStateId +
-      // initialPrivateState (empty here — the hello-world contract has no
-      // witnesses). args is the contract constructor's arguments: empty for
-      // hello-world's no-arg constructor. (Statically-typed contracts can omit
-      // args entirely; this script loads the contract dynamically, so the
-      // conditional args type widens to any[] and an explicit [] is required.)
+      // initialPrivateState. Counter uses a secretKey witness for ownership.
+      // args is empty (no constructor args). Explicit [] required for dynamic load.
       deployed = await deployContract(providers, {
         compiledContract: compiledContract as any,
         args: [],
         privateStateId: PRIVATE_STATE_ID,
-        initialPrivateState: {},
+        initialPrivateState,
       });
       break;
     } catch (err: any) {
