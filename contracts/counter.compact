@@ -1,0 +1,16 @@
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+// Public ledger state — counter visible on chain
+export ledger round: Counter;
+
+// Increment the on-chain counter by 1
+export circuit increment(): [] {
+  round.increment(1);
+}
+
+// Reset the counter to zero
+export circuit reset(): [] {
+  round.decrement(round);
+}

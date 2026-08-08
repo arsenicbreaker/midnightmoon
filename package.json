@@ -1,0 +1,27 @@
+{
+  "name": "my-project",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Midnight Compact counter contract",
+  "scripts": {
+    "compile": "compact compile contracts/counter.compact managed/counter",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "clean": "rm -rf managed/* && touch managed/.gitkeep"
+  },
+  "keywords": [
+    "midnight",
+    "compact",
+    "blockchain",
+    "zero-knowledge"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
