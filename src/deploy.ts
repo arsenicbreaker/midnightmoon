@@ -220,36 +220,83 @@ async function main() {
   }
 
   // Register for DUST.
+  // Preview/Preprod public RPCs sometimes close the WebSocket mid-submit with
+  // "1000:: Normal Closure". Retry registration: the tx may have landed even
+  // when the watch stream dies, so re-check UTXO flags between attempts.
   console.log('─── DUST Token Setup ───────────────────────────────────────────\n');
-  const dustState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)));
+  const DUST_REG_MAX_ATTEMPTS = 8;
+  const DUST_REG_RETRY_MS = 8000;
 
-  const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
-    (c: any) => !c.meta?.registeredForDustGeneration,
-  );
-  if (unregisteredUtxos.length > 0) {
-    console.log(`  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation...`);
+  for (let attempt = 1; attempt <= DUST_REG_MAX_ATTEMPTS; attempt++) {
+    const dustState = await Rx.firstValueFrom(
+      walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)),
+    );
+    const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
+      (c: any) => !c.meta?.registeredForDustGeneration,
+    );
+
+    if (unregisteredUtxos.length === 0) {
+      if (attempt > 1) console.log('  NIGHT UTXOs already registered for DUST.\n');
+      break;
+    }
+
+    console.log(
+      `  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation` +
+        (attempt > 1 ? ` (retry ${attempt}/${DUST_REG_MAX_ATTEMPTS})` : '') +
+        '...',
+    );
     // The signDustRegistration callback (3rd arg) already produces a recipe
     // with N signatures matching N inputs. Do NOT call signRecipe again — that
     // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
     // (Custom error 192). Matches upstream example-counter and example-bboard.
-    const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
-      unregisteredUtxos,
-      walletCtx.unshieldedKeystore.getPublicKey(),
-      (payload) => walletCtx.unshieldedKeystore.signData(payload),
-    );
-    const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
-    await walletCtx.wallet.submitTransaction(finalized);
+    try {
+      const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
+        unregisteredUtxos,
+        walletCtx.unshieldedKeystore.getPublicKey(),
+        (payload) => walletCtx.unshieldedKeystore.signData(payload),
+      );
+      const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
+      await walletCtx.wallet.submitTransaction(finalized);
+      break;
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      const cause = err?.cause?.message || err?.cause?.cause?.message || '';
+      const full = `${msg} ${cause}`;
+      const isTransient =
+        full.includes('disconnected') ||
+        full.includes('SubmissionError') ||
+        full.includes('Transaction submission') ||
+        full.includes('Normal Closure') ||
+        full.includes('WebSocket');
+
+      if (!isTransient || attempt === DUST_REG_MAX_ATTEMPTS) {
+        throw err;
+      }
+      console.log(
+        `  ⚠ DUST registration submit interrupted (${cause || msg}). ` +
+          `Waiting ${DUST_REG_RETRY_MS / 1000}s then re-checking...`,
+      );
+      await new Promise((r) => setTimeout(r, DUST_REG_RETRY_MS));
+      // Give the wallet a moment to re-sync so registered flags can update
+      // if the previous extrinsic actually landed.
+      await walletCtx.wallet.waitForSyncedState();
+    }
   }
 
-  if (dustState.dust.balance(new Date()) === 0n) {
-    console.log('  Waiting for DUST tokens...');
-    await Rx.firstValueFrom(
-      walletCtx.wallet.state().pipe(
-        Rx.throttleTime(5000),
-        Rx.filter((s) => s.isSynced),
-        Rx.filter((s) => s.dust.balance(new Date()) > 0n),
-      ),
+  {
+    const dustState = await Rx.firstValueFrom(
+      walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)),
     );
+    if (dustState.dust.balance(new Date()) === 0n) {
+      console.log('  Waiting for DUST tokens...');
+      await Rx.firstValueFrom(
+        walletCtx.wallet.state().pipe(
+          Rx.throttleTime(5000),
+          Rx.filter((s) => s.isSynced),
+          Rx.filter((s) => s.dust.balance(new Date()) > 0n),
+        ),
+      );
+    }
   }
   console.log('  DUST tokens ready!\n');
 
