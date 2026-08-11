@@ -132,7 +132,7 @@ The tests exercise claiming ownership, authorized increments and decrements, rej
 
 ## Initial Idea
 
-[LEAVE PLACEHOLDER — I will fill this in manually]
+The initial idea was to build a privacy-aware counter on Midnight that demonstrates how zero-knowledge proofs can be used for access control. The counter value and owner commitment remain publicly verifiable on-chain, while the owner's secret key stays private. Only a user who can prove knowledge of the secret key may increment or decrement the counter, without revealing the key itself.
 
 ## Screenshots
 
