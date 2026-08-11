@@ -136,4 +136,7 @@ The tests exercise claiming ownership, authorized increments and decrements, rej
 
 ## Screenshots
 
-[LEAVE PLACEHOLDER — I will add compile output and contract address screenshots]
+### Compile Output
+![Compile output](screenshots/compile.png)
+### Preview Deployment
+![Preview deployed contract address](screenshots/deploy.png)
