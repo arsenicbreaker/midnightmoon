@@ -1,11 +1,12 @@
 {
   "version": 2,
   "framework": "vite",
-  "installCommand": "npm ci",
+  "installCommand": "npm install",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "env": {
-    "VITE_MIDNIGHT_NETWORK_ID": "preprod"
+    "VITE_MIDNIGHT_NETWORK_ID": "preprod",
+    "VITE_COUNTER_CONTRACT_ADDRESS": "4704d059a008791f2f6182d65ca6970c2b921b59f604186e4221dda326b68691"
   },
   "rewrites": [
     {
