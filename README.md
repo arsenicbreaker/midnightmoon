@@ -4,7 +4,7 @@
 
 ## Live Demo
 
-[PASTE LIVE URL AFTER DEPLOYING FRONTEND]
+https://midnightmoon.vercel.app/
 
 ## Contract Address
 
