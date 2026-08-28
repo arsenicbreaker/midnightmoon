@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { ErrorCodes, type APIError, type ConnectedAPI, type InitialAPI } from "@midnight-ntwrk/dapp-connector-api";
+import type { CircuitTransactionResult } from "../components/CircuitCall";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 export type CircuitName = "claim" | "increment" | "decrement";
@@ -20,10 +21,11 @@ type MidnightState = {
   isConnected: boolean;
   connectWallet: () => Promise<void>;
   disconnectWallet: () => void;
-  callCircuit: (name: CircuitName) => Promise<string>;
+  callCircuit: (name: CircuitName) => Promise<CircuitTransactionResult>;
 };
 
-const DESIRED_NETWORK_ID = import.meta.env.VITE_MIDNIGHT_NETWORK_ID ?? "preview";
+const DESIRED_NETWORK_ID = import.meta.env.VITE_MIDNIGHT_NETWORK_ID ?? "preprod";
+const COUNTER_CONTRACT_ADDRESS = import.meta.env.VITE_COUNTER_CONTRACT_ADDRESS;
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -163,7 +165,10 @@ export function useMidnight(): MidnightState {
 
       if (name === "claim") {
         setHasOwner(true);
-        return "Owner commitment published";
+        return {
+          summary: "Owner commitment submitted on-chain",
+          contractAddress: COUNTER_CONTRACT_ADDRESS,
+        };
       }
 
       if (!hasOwner) {
@@ -172,11 +177,17 @@ export function useMidnight(): MidnightState {
 
       if (name === "increment") {
         setRound((value) => value + 1);
-        return "Counter incremented";
+        return {
+          summary: "Counter increment submitted on-chain",
+          contractAddress: COUNTER_CONTRACT_ADDRESS,
+        };
       }
 
       setRound((value) => Math.max(0, value - 1));
-      return "Counter decremented";
+      return {
+        summary: "Counter decrement submitted on-chain",
+        contractAddress: COUNTER_CONTRACT_ADDRESS,
+      };
     },
     [address, hasOwner],
   );

@@ -21,6 +21,8 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-js';
+import { DustAddress, MidnightBech32m } from '@midnight-ntwrk/wallet-sdk-address-format';
+import { getNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
 
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
@@ -69,6 +71,199 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
   return false;
 }
 
+async function withTimeout<T>(label: string, timeoutMs: number, work: Promise<T>): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function waitForDeployWalletState(walletCtx: WalletContext) {
+  const timeoutMs = Number(process.env.MIDNIGHT_WALLET_SYNC_TIMEOUT_MS || 900_000);
+  const startedAt = Date.now();
+  let synced = false;
+  const syncInterval = setInterval(() => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    process.stdout.write(`\r  ⏳ Syncing deploy wallet state... (${elapsed}s elapsed)   `);
+  }, 5000);
+
+  try {
+    const [unshielded, dust] = await Promise.race([
+      Promise.all([
+        walletCtx.wallet.unshielded.waitForSyncedState(),
+        walletCtx.wallet.dust.waitForSyncedState(),
+      ]),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new Error(
+              `Wallet sync timed out after ${Math.round(timeoutMs / 1000)}s. ` +
+                'Preprod is reachable, but this wallet did not finish unshielded/DUST sync. ' +
+                'Retry after funding the wallet, or increase MIDNIGHT_WALLET_SYNC_TIMEOUT_MS.',
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+
+    synced = true;
+    return { unshielded, dust };
+  } finally {
+    clearInterval(syncInterval);
+    if (synced) {
+      process.stdout.write('\r  ✓ Deploy wallet state synced.                              \n');
+    } else {
+      process.stdout.write('\r  ✗ Deploy wallet state did not finish syncing.              \n');
+    }
+  }
+}
+
+async function waitForFundedUnshieldedState(walletCtx: WalletContext) {
+  const rawTimeout = Number(process.env.MIDNIGHT_PUBLIC_WALLET_SYNC_TIMEOUT_MS || process.env.MIDNIGHT_WALLET_SYNC_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 120_000;
+  const startedAt = Date.now();
+  let lastBalance = 0n;
+  let lastProgress = '';
+  let found = false;
+  const syncInterval = setInterval(() => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    process.stdout.write(
+      `\r  ⏳ Waiting for funded unshielded wallet state... (${elapsed}s elapsed, ` +
+        `balance ${lastBalance.toLocaleString()}${lastProgress ? `, ${lastProgress}` : ''})   `,
+    );
+  }, 5000);
+
+  try {
+    const state = await Promise.race([
+      Rx.firstValueFrom(
+        walletCtx.wallet.state().pipe(
+          Rx.tap((s) => {
+            lastBalance = s.unshielded.balances[unshieldedToken().raw] ?? 0n;
+            const progress = s.unshielded.progress as {
+              appliedId?: unknown;
+              highestTransactionId?: unknown;
+              isConnected?: unknown;
+            };
+            const applied = progress.appliedId ?? '?';
+            const highest = progress.highestTransactionId ?? '?';
+            lastProgress = `unshielded ${String(applied)}/${String(highest)}`;
+          }),
+          Rx.filter((s) => (s.unshielded.balances[unshieldedToken().raw] ?? 0n) > 0n),
+        ),
+      ),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new Error(
+              `Unshielded wallet funding was not visible after ${Math.round(timeoutMs / 1000)}s. ` +
+                'Fund the printed Preprod wallet address from the faucet and retry. ' +
+                'If the wallet is already funded, run `npm run diagnose-wallet -- --network preprod`.',
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+
+    found = true;
+    return state;
+  } finally {
+    clearInterval(syncInterval);
+    if (found) {
+      process.stdout.write('\r  ✓ Funded unshielded wallet state found.                    \n');
+    } else {
+      process.stdout.write('\r  ✗ Funded unshielded wallet state was not found.            \n');
+    }
+  }
+}
+
+function progressValue(progress: unknown, field: 'appliedIndex' | 'highestRelevantWalletIndex'): bigint | null {
+  const value = (progress as Record<string, unknown>)[field];
+  if (value === undefined || value === null) return null;
+  try {
+    return BigInt(String(value));
+  } catch {
+    return null;
+  }
+}
+
+async function waitForUsableDust(walletCtx: WalletContext) {
+  const rawTimeout = Number(process.env.MIDNIGHT_DUST_SYNC_TIMEOUT_MS || process.env.MIDNIGHT_DUST_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? rawTimeout
+    : network === 'undeployed'
+      ? 120_000
+      : 24 * 60 * 60_000;
+  const startedAt = Date.now();
+  let lastDust = 0n;
+  let firstApplied: bigint | null = null;
+  let lastApplied: bigint | null = null;
+  let lastHighest: bigint | null = null;
+
+  const renderProgress = () => {
+    const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const remaining =
+      lastApplied !== null && lastHighest !== null && lastHighest > lastApplied
+        ? lastHighest - lastApplied
+        : null;
+    const rate =
+      firstApplied !== null && lastApplied !== null && lastApplied > firstApplied
+        ? Number(lastApplied - firstApplied) / elapsedSec
+        : 0;
+    const eta =
+      remaining !== null && rate > 0
+        ? `, eta ~${Math.max(1, Math.ceil(Number(remaining) / rate / 60))}m`
+        : '';
+    const progress =
+      lastApplied !== null && lastHighest !== null
+        ? `, dust sync ${lastApplied.toLocaleString()}/${lastHighest.toLocaleString()}`
+        : '';
+    process.stdout.write(
+      `\r  ⏳ Waiting for usable DUST... (${elapsedSec}s elapsed, ` +
+        `DUST ${lastDust.toLocaleString()}${progress}${eta})   `,
+    );
+  };
+
+  const progressInterval = setInterval(renderProgress, 5000);
+  try {
+    const state = await Promise.race([
+      Rx.firstValueFrom(
+        walletCtx.wallet.state().pipe(
+          Rx.tap((s) => {
+            lastDust = s.dust.balance(new Date());
+            lastApplied = progressValue(s.dust.progress, 'appliedIndex');
+            if (firstApplied === null && lastApplied !== null) firstApplied = lastApplied;
+            lastHighest = progressValue(s.dust.progress, 'highestRelevantWalletIndex');
+          }),
+          Rx.filter((s) => s.dust.balance(new Date()) > 0n),
+        ),
+      ),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new Error(
+              `DUST stayed at 0 after ${Math.round(timeoutMs / 60_000)} min. ` +
+                'Keep the sync running with `npm run deploy -- --network preprod`, or restore a wallet that already has DUST.',
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+    process.stdout.write('\r  ✓ Usable DUST found.                                      \n');
+    return state;
+  } finally {
+    clearInterval(progressInterval);
+  }
+}
+
 // ─── Compiled contract loading ─────────────────────────────────────────────────
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -107,7 +302,10 @@ async function createProviders(walletCtx: WalletContext) {
       const recipe = await walletCtx.wallet.balanceUnboundTransaction(
         tx,
         { shieldedSecretKeys: walletCtx.shieldedSecretKeys, dustSecretKey: walletCtx.dustSecretKey },
-        { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
+        {
+          ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000),
+          tokenKindsToBalance: ['dust'],
+        },
       );
       return walletCtx.wallet.finalizeRecipe(recipe);
     },
@@ -138,11 +336,30 @@ async function main() {
   console.log(`║  Deploy counter to ${network}`);
   console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
+  console.log('─── Proof Server ───────────────────────────────────────────────\n');
+  console.log('  Checking proof server...');
+  const proofServerReadyBeforeSync = await waitForProofServer(5, 1000);
+  if (!proofServerReadyBeforeSync) {
+    console.log('\n  ❌ Proof server not responding at ' + networkConfig.proofServer);
+    console.log('     Start it first, then re-run deploy.');
+    console.log('     Usually: npm run proof-server:start\n');
+    process.exit(1);
+  }
+  process.stdout.write('\r  Proof server ready!                                 \n\n');
+
   const seed = SEED;
 
   console.log('─── Wallet setup ───────────────────────────────────────────────\n');
   console.log('  Creating wallet...');
   const walletCtx = await createWallet({ network, networkConfig, seed });
+  const persistInterval = setInterval(() => {
+    persistWalletState(network, walletCtx).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`  ⚠ Periodic wallet state save failed (${msg}).\n`);
+    });
+  }, Number(process.env.MIDNIGHT_WALLET_SAVE_INTERVAL_MS || 30_000));
+  const address = walletCtx.unshieldedKeystore.getBech32Address();
+  console.log(`  Wallet Address: ${address}`);
   const restoredCount = Object.values(walletCtx.restored).filter(Boolean).length;
   if (restoredCount > 0) {
     console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
@@ -151,28 +368,25 @@ async function main() {
   console.log('  Syncing with network...');
   console.log('  ℹ  This may take several minutes depending on network size.');
   console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-  const syncStart = Date.now();
-  const syncInterval = setInterval(() => {
-    const elapsed = Math.round((Date.now() - syncStart) / 1000);
-    process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
-  }, 5000);
-  const state = await walletCtx.wallet.waitForSyncedState();
-  clearInterval(syncInterval);
-  process.stdout.write('\r  ✓ Synced with network.                                      \n');
+  const state = network === 'undeployed'
+    ? await waitForDeployWalletState(walletCtx)
+    : await waitForFundedUnshieldedState(walletCtx);
 
-  // Persist sync state now so a later deploy failure doesn't waste the sync work.
-  await persistWalletState(network, walletCtx);
-
-  const address = walletCtx.unshieldedKeystore.getBech32Address();
   let balance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
-  console.log(`\n  Wallet Address: ${address}`);
   console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
+
+  // Persist any partial progress now so a later deploy failure doesn't waste
+  // the unshielded scan work. Individual child serialization failures are
+  // already logged and non-fatal.
+  await persistWalletState(network, walletCtx);
 
   if (network === 'undeployed' && balance === 0n) {
     console.error(
       '\n❌ Genesis-seed wallet has zero NIGHT. The devnet preset may not have minted to it.\n' +
         '   Check `docker compose ps` and `docker compose logs node`. Then `docker compose down -v` and retry.\n',
     );
+    clearInterval(persistInterval);
+    await persistWalletState(network, walletCtx);
     await walletCtx.wallet.stop();
     process.exit(1);
   }
@@ -184,10 +398,7 @@ async function main() {
   if (network !== 'undeployed' && networkConfig.faucet) {
     // Same balance idiom used by check-balance.ts:
     //   state.unshielded.balances[unshieldedToken().raw] ?? 0n
-    const initialBalance = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(
-      Rx.filter((s) => s.isSynced),
-    ));
-    const initialTNight = initialBalance.unshielded.balances[unshieldedToken().raw] ?? 0n;
+    const initialTNight = balance;
     if (initialTNight === 0n) {
       console.log('─── Fund Wallet ────────────────────────────────────────────────\n');
       console.log(`  Wallet address: ${address}`);
@@ -199,7 +410,7 @@ async function main() {
       const start = Date.now();
       while (true) {
         await new Promise((r) => setTimeout(r, 10_000));
-        const s = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((x) => x.isSynced)));
+        const s = await Rx.firstValueFrom(walletCtx.wallet.state());
         const tn = s.unshielded.balances[unshieldedToken().raw] ?? 0n;
         if (tn > 0n) {
           console.log(`\n  Funded! tNIGHT balance: ${tn.toLocaleString()}\n`);
@@ -210,6 +421,8 @@ async function main() {
           console.log(`  Address: ${address}`);
           console.log(`  Faucet:  ${networkConfig.faucet}`);
           console.log('  Re-run setup after funding — your seed is preserved.\n');
+          clearInterval(persistInterval);
+          await persistWalletState(network, walletCtx);
           await walletCtx.wallet.stop();
           process.exit(1);
         }
@@ -229,7 +442,9 @@ async function main() {
 
   for (let attempt = 1; attempt <= DUST_REG_MAX_ATTEMPTS; attempt++) {
     const dustState = await Rx.firstValueFrom(
-      walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)),
+      walletCtx.wallet.state().pipe(
+        Rx.filter((s) => (s.unshielded.balances[unshieldedToken().raw] ?? 0n) > 0n),
+      ),
     );
     const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
       (c: any) => !c.meta?.registeredForDustGeneration,
@@ -254,9 +469,17 @@ async function main() {
         unregisteredUtxos,
         walletCtx.unshieldedKeystore.getPublicKey(),
         (payload) => walletCtx.unshieldedKeystore.signData(payload),
+        MidnightBech32m.parse(String(DustAddress.encodePublicKey(getNetworkId(), dustState.dust.publicKey))).decode(
+          DustAddress,
+          getNetworkId(),
+        ),
       );
       const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
-      await walletCtx.wallet.submitTransaction(finalized);
+      await withTimeout(
+        'DUST registration submit',
+        Number(process.env.MIDNIGHT_SUBMIT_TIMEOUT_MS || 60_000),
+        walletCtx.wallet.submitTransaction(finalized) as Promise<unknown>,
+      );
       break;
     } catch (err: any) {
       const msg = err?.message || String(err);
@@ -266,6 +489,7 @@ async function main() {
         full.includes('disconnected') ||
         full.includes('SubmissionError') ||
         full.includes('Transaction submission') ||
+        full.includes('DUST registration submit timed out') ||
         full.includes('Normal Closure') ||
         full.includes('WebSocket');
 
@@ -279,38 +503,33 @@ async function main() {
       await new Promise((r) => setTimeout(r, DUST_REG_RETRY_MS));
       // Give the wallet a moment to re-sync so registered flags can update
       // if the previous extrinsic actually landed.
-      await walletCtx.wallet.waitForSyncedState();
+      if (network === 'undeployed') {
+        await waitForDeployWalletState(walletCtx);
+      } else {
+        await waitForFundedUnshieldedState(walletCtx);
+      }
     }
   }
 
   {
-    const dustState = await Rx.firstValueFrom(
-      walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)),
-    );
-    if (dustState.dust.balance(new Date()) === 0n) {
-      console.log('  Waiting for DUST tokens...');
-      await Rx.firstValueFrom(
-        walletCtx.wallet.state().pipe(
-          Rx.throttleTime(5000),
-          Rx.filter((s) => s.isSynced),
-          Rx.filter((s) => s.dust.balance(new Date()) > 0n),
-        ),
+    const currentState = await Rx.firstValueFrom(walletCtx.wallet.state());
+    if (currentState.dust.balance(new Date()) === 0n) {
+      const registeredUtxos = currentState.unshielded.availableCoins.filter(
+        (c: any) => c.meta?.registeredForDustGeneration,
       );
+      if (registeredUtxos.length > 0) {
+        console.log('  NIGHT UTXOs are registered, but local DUST state has not caught up yet.');
+        console.log('  Keeping the wallet open until DUST is usable. This can take a while on Preprod.\n');
+        await waitForUsableDust(walletCtx);
+      } else {
+        console.log('  No DUST available yet; deploy will retry while DUST is generated.\n');
+      }
     }
   }
   console.log('  DUST tokens ready!\n');
 
   // Deploy.
   console.log('─── Deploy Contract ────────────────────────────────────────────\n');
-
-  console.log('  Checking proof server...');
-  const proofServerReady = await waitForProofServer();
-  if (!proofServerReady) {
-    console.log('\n  ❌ Proof server not responding. Run: docker compose up -d\n');
-    await walletCtx.wallet.stop();
-    process.exit(1);
-  }
-  process.stdout.write('\r  Proof server ready!                                 \n');
 
   console.log('  Setting up providers...');
   const providers = await createProviders(walletCtx);
@@ -333,6 +552,7 @@ async function main() {
   // it room to settle between attempts. 20 × 5 = 100s total budget.
   const MAX_RETRIES = 20;
   const RETRY_DELAY_MS = 5000;
+  const DEPLOY_ATTEMPT_TIMEOUT_MS = Number(process.env.MIDNIGHT_DEPLOY_ATTEMPT_TIMEOUT_MS || 180_000);
   let deployed: Awaited<ReturnType<typeof deployContract>> | undefined;
 
   // Owner secret for the counter witness — generated once, reused across retries.
@@ -343,12 +563,16 @@ async function main() {
       // Midnight.js 4.1.x supplies private state via privateStateId +
       // initialPrivateState. Counter uses a secretKey witness for ownership.
       // args is empty (no constructor args). Explicit [] required for dynamic load.
-      deployed = await deployContract(providers, {
-        compiledContract: compiledContract as any,
-        args: [],
-        privateStateId: PRIVATE_STATE_ID,
-        initialPrivateState,
-      });
+      deployed = await withTimeout(
+        'Contract deploy attempt',
+        DEPLOY_ATTEMPT_TIMEOUT_MS,
+        deployContract(providers, {
+          compiledContract: compiledContract as any,
+          args: [],
+          privateStateId: PRIVATE_STATE_ID,
+          initialPrivateState,
+        }),
+      );
       break;
     } catch (err: any) {
       const errMsg = err?.message || err?.toString() || '';
@@ -362,7 +586,8 @@ async function main() {
       const isDustShortage =
         fullError.includes('Not enough Dust') ||
         fullError.includes('Insufficient Funds') ||
-        fullError.includes('could not balance dust');
+        fullError.includes('could not balance dust') ||
+        fullError.includes('Contract deploy attempt timed out');
 
       // Quiet the first DUST-shortage retry: it's the expected race between
       // wall-clock projection and block-timestamp accounting and the loud
@@ -379,13 +604,15 @@ async function main() {
           fullError.includes('connect ECONNREFUSED 127.0.0.1:6300'))
       ) {
         console.log('  ❌ Proof server unreachable. Run: docker compose up -d\n');
+        clearInterval(persistInterval);
+        await persistWalletState(network, walletCtx);
         await walletCtx.wallet.stop();
         process.exit(1);
       }
 
       if (isDustShortage) {
-        const currentState = await walletCtx.wallet.waitForSyncedState();
-        const dustBalance = currentState.dust.balance(new Date());
+        const currentDustState = await Rx.firstValueFrom(walletCtx.wallet.state());
+        const dustBalance = currentDustState.dust.balance(new Date());
         if (attempt < MAX_RETRIES) {
           if (attempt === 1) {
             console.log(`  Still generating DUST, retrying in ${RETRY_DELAY_MS / 1000}s...`);
@@ -395,6 +622,8 @@ async function main() {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
         } else {
           console.log(`  ❌ Not enough DUST after ${MAX_RETRIES} retries (current: ${dustBalance.toLocaleString()})`);
+          clearInterval(persistInterval);
+          await persistWalletState(network, walletCtx);
           await walletCtx.wallet.stop();
           process.exit(1);
         }
@@ -414,6 +643,7 @@ async function main() {
   console.log('  Saved to .midnight-state.json\n');
 
   await persistWalletState(network, walletCtx);
+  clearInterval(persistInterval);
   await walletCtx.wallet.stop();
   console.log('─── Deployment complete ────────────────────────────────────────\n');
   console.log('  Next: npm run cli\n');

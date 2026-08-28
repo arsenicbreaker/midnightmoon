@@ -300,6 +300,21 @@ button:disabled {
   line-height: 1.5;
 }
 
+.privacy-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--success);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.privacy-label svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .circuit-controls {
   display: grid;
   justify-items: end;
@@ -318,6 +333,27 @@ button:disabled {
 
 .result-error {
   color: var(--danger);
+}
+
+.tx-result {
+  display: grid;
+  max-width: 360px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  text-align: right;
+}
+
+.tx-result dt {
+  font-weight: 700;
+}
+
+.tx-result dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 .spin {
@@ -376,6 +412,11 @@ button:disabled {
 
   .result {
     justify-content: flex-start;
+    text-align: left;
+  }
+
+  .tx-result {
+    max-width: none;
     text-align: left;
   }
 }
