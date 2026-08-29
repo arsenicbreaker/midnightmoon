@@ -37,10 +37,6 @@ Midnight Private Counter is a privacy-preserving Midnight dApp that lets a user 
 
 Website: https://midnightmoon.vercel.app/
 
-## Live Demo
-
-https://midnightmoon.vercel.app/
-
 ## Contract Address
 
 | Network | Address                                                            |
