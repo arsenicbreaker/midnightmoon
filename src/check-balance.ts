@@ -6,7 +6,7 @@ import { WebSocket } from 'ws';
 // Midnight SDK imports
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice } from './network';
 // unshieldedToken is re-exported from ./wallet (originally @midnight-ntwrk/midnight-js-protocol/ledger).
-import { createWallet, persistWalletState, unshieldedToken } from './wallet';
+import { createWallet, persistWalletState, waitForWalletSync, unshieldedToken } from './wallet';
 
 // Enable WebSocket for GraphQL subscriptions
 // @ts-expect-error Required for wallet sync
@@ -40,14 +40,8 @@ async function main() {
     console.log('  Syncing with network...');
     console.log('  ℹ  This may take several minutes depending on network size.');
     console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-    const syncStart = Date.now();
-    const syncInterval = setInterval(() => {
-      const elapsed = Math.round((Date.now() - syncStart) / 1000);
-      process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
-    }, 5000);
-    const state = await walletCtx.wallet.waitForSyncedState();
-    clearInterval(syncInterval);
-    process.stdout.write('\r  ✓ Synced with network.                                      \n');
+    const state = await waitForWalletSync(network, walletCtx);
+    process.stdout.write('\n  ✓ Synced with network.\n');
 
     const address = walletCtx.unshieldedKeystore.getBech32Address();
     const tNightBalance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;

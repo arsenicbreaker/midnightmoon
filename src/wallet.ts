@@ -193,3 +193,88 @@ export async function persistWalletState(
 
   saveWalletState(network, next, { cwd });
 }
+
+type SyncProgressLike = {
+  isConnected?: boolean;
+  appliedIndex?: bigint;
+  highestIndex?: bigint;
+  appliedId?: bigint;
+  highestTransactionId?: bigint;
+  isStrictlyComplete?: () => boolean;
+};
+
+function formatProgress(progress: SyncProgressLike | undefined): string {
+  if (!progress) return 'waiting for state';
+
+  const applied = progress.appliedIndex ?? progress.appliedId ?? 0n;
+  const highest = progress.highestIndex ?? progress.highestTransactionId ?? 0n;
+  const connected = progress.isConnected ? 'connected' : 'disconnected';
+  const complete = progress.isStrictlyComplete?.() ?? false;
+  const percentage = highest > 0n
+    ? `${(Number((applied * 1_000n) / highest) / 10).toFixed(1)}%`
+    : complete ? '100.0%' : '0.0%';
+
+  return `${connected}, ${applied.toLocaleString()}/${highest.toLocaleString()} (${percentage})`;
+}
+
+/**
+ * Wait for all child wallets while exposing per-wallet progress and writing
+ * resumable checkpoints. Checkpoint writes are serialized so a slow disk or a
+ * large shielded state cannot produce overlapping snapshots.
+ */
+export async function waitForWalletSync(
+  network: NetworkId,
+  ctx: WalletContext,
+  opts: { cwd?: string; progressIntervalMs?: number; checkpointIntervalMs?: number } = {},
+) {
+  const progressIntervalMs = opts.progressIntervalMs ?? 5_000;
+  const checkpointIntervalMs = opts.checkpointIntervalMs ?? 30_000;
+  const startedAt = Date.now();
+  let latestState: any;
+  let checkpointInFlight: Promise<void> | null = null;
+
+  const subscription = ctx.wallet.state().subscribe({
+    next: (state) => { latestState = state; },
+    error: (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`\n  ⚠ Wallet progress stream failed: ${msg}\n`);
+    },
+  });
+
+  const printProgress = () => {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const shielded = formatProgress(latestState?.shielded?.state?.progress);
+    const unshielded = formatProgress(latestState?.unshielded?.progress);
+    const dust = formatProgress(latestState?.dust?.state?.progress);
+    process.stdout.write(
+      `\n  ⏳ Sync ${elapsed}s | shielded: ${shielded} | unshielded: ${unshielded} | dust: ${dust}`,
+    );
+  };
+
+  const saveCheckpoint = () => {
+    if (checkpointInFlight) return;
+    checkpointInFlight = persistWalletState(network, ctx, opts.cwd)
+      .then(() => { process.stdout.write('\n  💾 Wallet sync checkpoint saved.'); })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`\n  ⚠ Could not save wallet sync checkpoint: ${msg}`);
+      })
+      .finally(() => { checkpointInFlight = null; });
+  };
+
+  printProgress();
+  const progressTimer = setInterval(printProgress, progressIntervalMs);
+  const checkpointTimer = setInterval(saveCheckpoint, checkpointIntervalMs);
+
+  try {
+    const state = await ctx.wallet.waitForSyncedState();
+    if (checkpointInFlight) await checkpointInFlight;
+    await persistWalletState(network, ctx, opts.cwd);
+    return state;
+  } finally {
+    clearInterval(progressTimer);
+    clearInterval(checkpointTimer);
+    subscription.unsubscribe();
+    if (checkpointInFlight) await checkpointInFlight;
+  }
+}

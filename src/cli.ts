@@ -16,7 +16,7 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, getDeployment } from './network';
-import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
+import { createWallet, persistWalletState, waitForWalletSync, unshieldedToken, type WalletContext } from './wallet';
 import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-js';
 
 // Enable WebSocket for GraphQL subscriptions
@@ -128,17 +128,8 @@ async function main() {
     console.log('  Syncing with network...');
     console.log('  ℹ  This may take several minutes depending on network size.');
     console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-    const syncStart = Date.now();
-    const syncInterval = setInterval(() => {
-      const elapsed = Math.round((Date.now() - syncStart) / 1000);
-      process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
-    }, 5000);
-    const state = await walletCtx.wallet.waitForSyncedState();
-    clearInterval(syncInterval);
-    process.stdout.write('\r  ✓ Synced with network.                                      \n');
-
-    // Persist sync state so the next run doesn't have to redo this work.
-    await persistWalletState(network, walletCtx);
+    const state = await waitForWalletSync(network, walletCtx);
+    process.stdout.write('\n  ✓ Synced with network.\n');
     const balance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
     console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
 
