@@ -109,7 +109,29 @@ Run the frontend:
 npm run dev
 ```
 
-Open the printed Vite URL in a browser with Lace installed, connect Lace on Preprod, and call the counter circuits from the app.
+Open the printed Vite URL in a browser with Lace installed. Enter the private-state password, connect Lace on Preprod, and call the counter circuits from the app.
+
+## Browser integration
+
+The frontend builds the compiled circuit with Midnight.js, verifies deployed verifier keys, generates proofs through Lace's proving provider, asks Lace to balance/sign, submits the serialized transaction, and waits for successful chain confirmation. Receipts contain the actual transaction ID and block height. The round and owner presence are read from the indexer, including after reload; no local counter arithmetic simulates transactions.
+
+Before connecting, enter a private-state password (at least 16 characters, with uppercase, lowercase, digit and symbol). Private state is encrypted and scoped to network, wallet account and contract in browser storage. Reuse the same browser origin/profile and password. Clearing browser data loses the private witness. Lace needs usable Preprod DUST and a functioning proving provider. Proving privacy depends on the provider configured in Lace; a remote prover may receive private proving inputs.
+
+The deployed `claim()` circuit can replace an existing owner. This is a reclaimable demo; it does not enforce permanent ownership. The frontend preserves compatibility with the checked-in deployment artifacts. A one-time claim policy requires recompilation and a new deployment.
+
+The browser adapter follows the [official connector transaction API](https://github.com/midnightntwrk/midnight-dapp-connector-api).
+
+## Verification
+
+```bash
+npm test
+npx playwright install chromium
+npm run test:browser
+npm run verify:preprod # read-only live ledger and circuit-key check
+```
+
+Contract simulation and browser checks do not establish that a Preprod transaction succeeded. Browser checks cover production bundle startup, unavailable/wrong-network wallets, and compiled artifact delivery.
 
 ## Demo Video
+
 https://www.youtube.com/watch?v=fe_xa_-ZH44

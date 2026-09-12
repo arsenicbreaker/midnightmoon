@@ -19,7 +19,11 @@
     "check-balance": "npx tsx src/check-balance.ts",
     "network": "npx tsx src/network.ts",
     "proof-server:start": "docker compose up -d",
-    "proof-server:stop": "docker compose down"
+    "proof-server:stop": "docker compose down",
+    "predev": "node scripts/copy-contract-assets.mjs",
+    "prebuild": "node scripts/copy-contract-assets.mjs",
+    "test:browser": "npm run build && playwright test",
+    "verify:preprod": "tsx scripts/verify-preprod.ts"
   },
   "keywords": [
     "midnight",
@@ -46,6 +50,9 @@
     "@midnight-ntwrk/midnight-js-utils": "4.1.1",
     "@midnight-ntwrk/wallet-sdk": "1.2.0",
     "@scure/bip39": "2.2.0",
+    "assert": "^2.1.0",
+    "buffer": "^6.0.3",
+    "events": "^3.3.0",
     "lucide-react": "^1.34.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -53,6 +60,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",

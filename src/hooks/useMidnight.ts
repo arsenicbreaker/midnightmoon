@@ -1,6 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import { ErrorCodes, type APIError, type ConnectedAPI, type InitialAPI } from "@midnight-ntwrk/dapp-connector-api";
 import type { CircuitTransactionResult } from "../components/CircuitCall";
+
+import { connectCounter, networkId, type CounterSession } from "../integration/counter";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 export type CircuitName = "claim" | "increment" | "decrement";
@@ -16,7 +18,11 @@ type MidnightState = {
   error: string | null;
   walletName: string | null;
   desiredNetworkId: string;
-  round: number;
+  round: bigint | null;
+  busy: boolean;
+  phase: string;
+  password: string;
+  setPassword: (value: string) => void;
   hasOwner: boolean;
   isConnected: boolean;
   connectWallet: () => Promise<void>;
@@ -24,12 +30,7 @@ type MidnightState = {
   callCircuit: (name: CircuitName) => Promise<CircuitTransactionResult>;
 };
 
-const DESIRED_NETWORK_ID = import.meta.env.VITE_MIDNIGHT_NETWORK_ID ?? "preprod";
-const COUNTER_CONTRACT_ADDRESS = import.meta.env.VITE_COUNTER_CONTRACT_ADDRESS;
-
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
+const DESIRED_NETWORK_ID = networkId;
 
 function isDAppConnectorError(error: unknown): error is APIError {
   return (
@@ -106,10 +107,32 @@ export function useMidnight(): MidnightState {
   const [error, setError] = useState<string | null>(null);
   const [walletName, setWalletName] = useState<string | null>(null);
   const [connectedApi, setConnectedApi] = useState<ConnectedAPI | null>(null);
-  const [round, setRound] = useState(0);
+  const [round, setRound] = useState<bigint | null>(null);
   const [hasOwner, setHasOwner] = useState(false);
 
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState('Connect to read the deployed ledger');
+  const session = useRef<CounterSession | null>(null);
+  const generation = useRef(0);
+  const pending = useRef(false);
+  useEffect(() => {
+    if (connectionStatus !== 'connected') return;
+    const current = session.current;
+    const refresh = () => current?.read().then(state => {
+      if (session.current !== current) return;
+      setRound(state.round);
+      setHasOwner(state.owner.some(byte => byte !== 0));
+    }).catch(() => {
+      if (session.current === current) setError('Unable to refresh ledger state. Reconnect to retry.');
+    });
+    const timer = window.setInterval(refresh, 10000);
+    return () => window.clearInterval(timer);
+  }, [connectionStatus]);
+
   const connectWallet = useCallback(async () => {
+    if (pending.current) return;
+    const version = ++generation.current;
     setError(null);
     setConnectionStatus("connecting");
 
@@ -134,20 +157,36 @@ export function useMidnight(): MidnightState {
       }
 
       const walletAddress = await readWalletAddress(api);
+      setPhase('Verifying deployed circuit keys and loading ledger');
+      const counter = await connectCounter(api, walletAddress, password, setPhase);
+      const state = await counter.read();
+      if (version !== generation.current) return;
+      session.current = counter;
+      setRound(state.round);
+      setHasOwner(state.owner.some(byte => byte !== 0));
+      setPhase('Connected to verified contract');
       setConnectedApi(api);
       setWalletName(connector.api.name || "Lace");
       setAddress(walletAddress);
       setConnectionStatus("connected");
     } catch (caught) {
+      if (version !== generation.current) return;
       setConnectedApi(null);
       setWalletName(null);
       setAddress(null);
       setConnectionStatus("disconnected");
       setError(formatConnectorError(caught));
     }
-  }, []);
+  }, [password]);
 
   const disconnectWallet = useCallback(() => {
+    if (pending.current) return;
+    generation.current++;
+    session.current = null;
+    setRound(null);
+    setHasOwner(false);
+    setPassword('');
+    setPhase('Disconnected');
     setConnectedApi(null);
     setWalletName(null);
     setAddress(null);
@@ -157,43 +196,36 @@ export function useMidnight(): MidnightState {
 
   const callCircuit = useCallback(
     async (name: CircuitName) => {
-      if (!address) {
-        throw new Error("Connect a wallet before calling a circuit.");
+      const current = session.current;
+      if (!current) throw new Error('Connect and unlock private state first.');
+      if (pending.current) throw new Error('Wait for the pending transaction.');
+      pending.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        const result = await current.call(name);
+        try {
+          const state = await current.read();
+          setRound(state.round);
+          setHasOwner(state.owner.some(byte => byte !== 0));
+        } catch {
+          setError('Transaction confirmed, but ledger refresh failed. Reconnect to reload.');
+        }
+        setPhase(result.summary);
+        return result;
+      } catch (caught) {
+        setPhase('Call failed or confirmation unavailable. Check Lace history before retrying.');
+        throw caught;
+      } finally {
+        pending.current = false;
+        setBusy(false);
       }
-
-      await wait(500);
-
-      if (name === "claim") {
-        setHasOwner(true);
-        return {
-          summary: "Owner commitment submitted on-chain",
-          contractAddress: COUNTER_CONTRACT_ADDRESS,
-        };
-      }
-
-      if (!hasOwner) {
-        throw new Error("Claim ownership before changing the counter.");
-      }
-
-      if (name === "increment") {
-        setRound((value) => value + 1);
-        return {
-          summary: "Counter increment submitted on-chain",
-          contractAddress: COUNTER_CONTRACT_ADDRESS,
-        };
-      }
-
-      setRound((value) => Math.max(0, value - 1));
-      return {
-        summary: "Counter decrement submitted on-chain",
-        contractAddress: COUNTER_CONTRACT_ADDRESS,
-      };
-    },
-    [address, hasOwner],
+    }, [],
   );
 
   return useMemo(
     () => ({
+      busy, phase, password, setPassword,
       address,
       connectionStatus,
       error,
@@ -207,6 +239,7 @@ export function useMidnight(): MidnightState {
       callCircuit,
     }),
     [
+      busy, phase, password,
       address,
       callCircuit,
       connectWallet,

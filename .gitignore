@@ -58,3 +58,8 @@ temp/
 
 # Midnight wallet sync state (per-network serialized wallet state cache)
 .midnight-wallet-state/
+
+# Generated browser proving assets and browser test output
+public/counter/
+test-results/
+playwright-report/

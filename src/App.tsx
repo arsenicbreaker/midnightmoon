@@ -24,6 +24,15 @@ export default function App() {
           />
         </header>
 
+        {!midnight.isConnected && <label>
+          Private state password
+          <input type="password" autoComplete="current-password" value={midnight.password}
+            onChange={event => midnight.setPassword(event.target.value)} disabled={midnight.connectionStatus === 'connecting'} />
+          <p className="muted">Use at least 16 characters with uppercase, lowercase, a number and a symbol. Reuse this password to unlock your encrypted ownership secret in this browser.</p>
+        </label>}
+        <p role="status">{midnight.phase}</p>
+        {midnight.isConnected && midnight.error && <p role="alert">{midnight.error}</p>}
+        <p className="muted">This deployed demo allows anyone to claim again and replace the owner. Increment and decrement require the current owner's private secret.</p>
         <div className="dashboard-grid">
           <section className="panel counter-panel" aria-labelledby="counter-title">
             <div>
@@ -31,7 +40,7 @@ export default function App() {
               <h2 id="counter-title">Round</h2>
             </div>
             <p className="counter-value" aria-live="polite">
-              {midnight.round}
+              {midnight.round?.toString() ?? '—'}
             </p>
             <p className="muted">
               The counter value is public. Ownership is proven with a private
@@ -49,21 +58,21 @@ export default function App() {
                 name="claim"
                 label="Claim ownership"
                 description="Publish the owner commitment derived from your private key."
-                disabled={!midnight.isConnected}
+                disabled={midnight.busy || !midnight.isConnected}
                 onCall={() => midnight.callCircuit("claim")}
               />
               <CircuitCall
                 name="increment"
                 label="Increment"
                 description="Prove ownership and increase the public round."
-                disabled={!midnight.isConnected || !midnight.hasOwner}
+                disabled={midnight.busy || !midnight.isConnected || !midnight.hasOwner}
                 onCall={() => midnight.callCircuit("increment")}
               />
               <CircuitCall
                 name="decrement"
                 label="Decrement"
                 description="Prove ownership and decrease the public round."
-                disabled={!midnight.isConnected || !midnight.hasOwner}
+                disabled={midnight.busy || !midnight.isConnected || !midnight.hasOwner}
                 onCall={() => midnight.callCircuit("decrement")}
               />
             </div>

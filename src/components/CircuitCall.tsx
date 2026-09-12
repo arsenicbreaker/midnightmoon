@@ -3,7 +3,7 @@ import { useState } from "react";
 
 export type CircuitTransactionResult = {
   summary: string;
-  txId?: string;
+  txId: string;
   blockHeight?: bigint | number | string;
   contractAddress?: string;
 };
@@ -37,7 +37,7 @@ export function CircuitCall({
   async function handleCall() {
     setState({
       status: "loading",
-      message: `Generating local proof for ${name}`,
+      message: `Preparing transaction for ${name}`,
     });
 
     try {
@@ -87,7 +87,7 @@ export function CircuitCall({
                 <dd>{state.result.txId}</dd>
               </>
             ) : null}
-            {state.result.blockHeight ? (
+            {state.result.blockHeight !== undefined ? (
               <>
                 <dt>Block</dt>
                 <dd>{state.result.blockHeight.toString()}</dd>
